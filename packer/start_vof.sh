@@ -25,7 +25,8 @@ sudo echo "export SLACK_WEBHOOK=$(get_var "slackWebhook")" >> /home/vof/.env_set
 sudo echo "export SLACK_CHANNEL=$(get_var "slackChannel")" >> /home/vof/.env_setup_rc
 gsutil cp gs://${BUCKET_NAME}/ssl/andela_key.key /home/vof/andela_key.key
 gsutil cp gs://${BUCKET_NAME}/ssl/andela_certificate.crt /home/vof/andela_certificate.crt
-
+gsutil cp gs://${BUCKET_NAME}/ssl/andela_key.key /etc/nginx/andela_key.key
+gsutil cp gs://${BUCKET_NAME}/ssl/andela_certificate.crt /etc/nginx/andela_certificate.crt
 update_application_yml() {
   cat <<EOF >> /home/vof/app/config/application.yml
 ACTION_CABLE_URL: '$(get_var "cableURL")'
@@ -63,7 +64,7 @@ create_log_files() {
 create_vof_supervisord_conf() {
   sudo cat <<EOF > /etc/supervisor/conf.d/vof.conf
 [program:vof]
-command=/usr/bin/env RAILS_ENV=${DEPLOY_ENV} PORT=${PORT} RAILS_SERVE_STATIC_FILES=true /usr/bin/nohup /usr/local/bin/bundle exec puma -b ${SSL_CONFIG_PATH} -C config/puma.rb
+command=/usr/bin/env RAILS_ENV=${DEPLOY_ENV} PORT=${PORT} RAILS_SERVE_STATIC_FILES=true /usr/bin/nohup /usr/local/bin/bundle exec puma -b ${SSL_CONFIG_PATH} -b unix:///tmp/my_app.sock -C config/puma.rb
 directory=/home/vof/app
 autostart=true
 autorestart=true
@@ -86,6 +87,23 @@ get_database_dump_file() {
     fi
   fi
 }
+
+configure_nginx() {
+sudo rm -rf /etc/nginx/sites-available/default
+sudo touch  /etc/nginx/sites-available
+sudo chmod u+w /etc/nginx/sites-available
+sudo cp /home/vof/default /etc/nginx/sites-available
+sudo rm -rf /etc/nginx/nginx.conf
+sudo touch /etc/nginx
+sudo chmod u+w /etc/nginx
+sudo cp /home/vof/nginx.conf /etc/nginx
+}
+start_nginx(){
+sudo systemctl start nginx
+sudo systemctl restart nginx
+
+}
+
 start_bugsnag(){
  local app_root="/home/vof/app"
 sudo -u vof bash -c " cd ${app_root} && rails generate bugsnag ${BUGSNAG_KEY} -f"
@@ -257,9 +275,10 @@ main() {
   update_application_yml
   create_secrets_yml
   create_vof_supervisord_conf
-
   authenticate_service_account
   get_database_dump_file
+  configure_nginx
+  start_nginx
   start_bugsnag
   start_app
   configure_google_fluentd_logging

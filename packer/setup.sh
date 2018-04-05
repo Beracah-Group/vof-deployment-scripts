@@ -9,10 +9,17 @@ create_vof_user() {
   fi
 }
 
+install_nginx() {
+sudo rm /var/lib/apt/lists/lock
+sudo apt-get install nginx -y
+
+}
+
 setup_vof_code() {
-  sudo chown -R vof:vof /home/vof 
+  sudo chown -R vof:vof /home/vof
   cd /home/vof/app && bundle install
 }
+
 
 start_supervisor_service() {
   sudo service supervisor start
@@ -20,7 +27,7 @@ start_supervisor_service() {
 
 main() {
   create_vof_user
-
+ install_nginx
   setup_vof_code
   start_supervisor_service
 }
