@@ -10,8 +10,8 @@ create_vof_user() {
 }
 
 install_nginx() {
-sudo rm /var/lib/apt/lists/lock
-sudo apt-get install nginx -y
+ sudo chown -R vof:vof /home/vof
+cd /home/vof/app && apt-get install nginx -y
 
 }
 
