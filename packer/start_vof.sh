@@ -3,6 +3,12 @@
 set -ex
 set -o pipefail
 
+export SCRIPT_FILE="/home/vof/setup-scripts"
+
+# import functions
+. ${SCRIPT_FILE}/setup_filebeat.sh
+. ${SCRIPT_FILE}/setup_metricbeat.sh
+
 get_var() {
   local name="$1"
 
@@ -52,7 +58,62 @@ POSTGRES_USER: '$(get_var "databaseUser")'
 POSTGRES_PASSWORD: '$(get_var "databasePassword")'
 POSTGRES_HOST: '$(get_var "databaseHost")'
 POSTGRES_DB: '$(get_var "databaseName")'
+GOOGLE_STORAGE_ACCESS_KEY_ID: '$(get_var "google_storage_access_key_id")'
+GOOGLE_STORAGE_SECRET_ACCESS_KEY: '$(get_var "google_storage_secret_access_key")'
 EOF
+
+if [ "$RAILS_ENV" == "production" ]; then
+  cat <<EOF >> /home/vof/app/config/application.yml
+AUTH_URL: 'https://vof-login-prod.andela.com'
+AUTH_ACCESS_TOKEN: '2574fd1d8c985221c7053931b614359feaf981840fe1c65c9d79e4938899f036e0fe9a208d40f3137f76a79be51fe3d4d88b4eb68d5d44d0cc2e326559bbbf82'
+PUBLIC_KEY: "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu/PXShcrLcoKYYr6sAuU\nGPjmb0qSwo5aYDjnXJ2fWbzeC+PadR2n6Pn9vWwZzOv6nSM5ocVNNRpAyHvT0mQf\n7DikDJANSwpQHwYpKkgdBDydzMeOBhFpkhLeUOfnF4a/sfB8OP+/PvW5vsRhx4WR\n+1PZDFXuCq/AbcBuzBsNJ8Q3gmB2/m7VeltIb5QXIs5zHCFC0tLS/WCNYfcfhviW\n7sz3qVSggrhEs2SgpvMBwiQHwNkP7/vfrNl6pKctLTvibdlWfF9JiER+a8Eq/Dge\nSnt70Gtn5rQnkN08DNLfxjiSskzef8pNh+9H5oI7Ee5UJpIOEyQ7p+XzEDzT1zy5\nTQIDAQAB\n-----END PUBLIC KEY-----"
+EOF
+else
+ cat <<EOF >> /home/vof/app/config/application.yml
+AUTH_URL: 'https://vof-login-staging.andela.com'
+PUBLIC_KEY: "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu/PXShcrLcoKYYr6sAuU\nGPjmb0qSwo5aYDjnXJ2fWbzeC+PadR2n6Pn9vWwZzOv6nSM5ocVNNRpAyHvT0mQf\n7DikDJANSwpQHwYpKkgdBDydzMeOBhFpkhLeUOfnF4a/sfB8OP+/PvW5vsRhx4WR\n+1PZDFXuCq/AbcBuzBsNJ8Q3gmB2/m7VeltIb5QXIs5zHCFC0tLS/WCNYfcfhviW\n7sz3qVSggrhEs2SgpvMBwiQHwNkP7/vfrNl6pKctLTvibdlWfF9JiER+a8Eq/Dge\nSnt70Gtn5rQnkN08DNLfxjiSskzef8pNh+9H5oI7Ee5UJpIOEyQ7p+XzEDzT1zy5\nTQIDAQAB\n-----END PUBLIC KEY-----"
+AUTH_ACCESS_TOKEN: '48572b447d4f96cad034cb9f6ed9d0885864de64d77c4fd90bd90164998b1fd471ba2011b3a409c107a7032529abc9f4c3456da0cd74ac7b249086440bb2daab'
+EOF
+fi
+}
+
+create_pgpass_file(){
+  cat <<EOF > /home/vof/.pgpass
+$(get_var "databaseHost"):5432:$(get_var "databaseName"):$(get_var "databaseUser"):$(get_var "databasePassword")
+EOF
+sudo chown vof:vof /home/vof/.pgpass
+chmod 0600 /home/vof/.pgpass
+}
+
+edit_postgresql_backup_file(){
+  if [ "$RAILS_ENV" == "production" ]; then
+    # create backups directory
+    mkdir /home/vof/backups
+    #change permissions on backup folder
+    chmod 777 /home/vof/backups
+    chmod 777 /home/vof/post_backup_to_slack.sh
+    #make vof user owner of backups folder
+    sudo chown vof:vof /home/vof/backups
+    sudo chown vof:vof /home/vof/post_backup_to_slack.sh
+    # edit backup script to include required parameters
+    sed -i "s/pg_dump/pg_dump -h '$(get_var "databaseHost")' -U '$(get_var "databaseUser")' -d '$(get_var "databaseName")'/g" /home/vof/backup.sh
+    sed -i "s/token=/token='$(get_var "dbBackupNotificationToken")'/g" /home/vof/post_backup_to_slack.sh
+    #make vof user owner of backup.sh file
+    sudo chown vof:vof /home/vof/backup.sh
+    # change permissions on backup.sh file
+    chmod 777 /home/vof/backup.sh
+    # create cron jobs
+    cat > cron_file_create <<'EOF'
+# create cron job that creates database backup at 23:55 EAT daily
+55 20 * * * /bin/bash /home/vof/backup.sh
+# create cron job to post database backup at 00:00 EAT daily
+0 21 * * * /bin/bash /home/vof/post_backup_to_slack.sh
+# create cron job to delete database backup files from server at 00:05 EAT daily
+5 21 * * * /bin/rm -r /home/vof/backups/vof-*
+EOF
+    # add cron jobs to crontab
+    crontab -u vof cron_file_create
+  fi
 }
 
 create_secrets_yml() {
@@ -96,10 +157,15 @@ authenticate_service_account() {
 authorize_database_access_networks() {
   CURRENTIPS="$(gcloud compute instances list --project vof-tracker-app | grep ${RAILS_ENV}-vof-app-instance | awk -v ORS=, '{if ($5) print $5}' | sed 's/,$//')"
 
+  # authorize certain IPs to access staging db but not the production db
+  if [ "$RAILS_ENV" != "production" ]; then
+    CURRENTIPS="${CURRENTIPS},105.21.72.66,105.21.32.90,105.27.99.66,41.90.97.134,41.75.89.154,169.239.188.10,41.215.245.118"
+  fi
+
   # ensure replica's authorized networks are also updated
   for sqlInstanceName in $(gcloud sql instances list --project vof-tracker-app | grep ${RAILS_ENV}-vof-database-instance | awk -v ORS=" " '{if ($1 !~ /production-vof-database-instance-vew0wndaum8/) print $1}'); do
     gcloud sql instances patch $sqlInstanceName --quiet --authorized-networks=$CURRENTIPS,41.75.89.154,158.106.201.190,41.215.245.162,108.41.204.165,14.140.245.142,182.74.31.70,54.208.19.24,35.166.153.63,54.208.19.13,54.69.5.5,52.36.120.247,52.45.79.49,34.199.147.194
-  done 
+  done
 
 }
 
@@ -279,11 +345,12 @@ update_crontab() {
   rm upgrades_cron log_cron supervisord_cron
 }
 
-
 main() {
   echo "startup script invoked at $(date)" >> /tmp/script.log
 
   create_log_files
+  create_pgpass_file
+  edit_postgresql_backup_file
   update_application_yml
   create_secrets_yml
   create_vof_supervisord_conf
@@ -296,6 +363,13 @@ main() {
   set -o pipefail
   get_database_dump_file
   start_bugsnag
+
+  install_filebeat
+  setup_filebeat
+
+  install_metricbeat
+  setup_metricbeat
+
   start_app
   configure_google_fluentd_logging
   configure_log_reader_positioning
